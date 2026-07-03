@@ -6,7 +6,10 @@ helper (vantage_helper.py); reads are used directly by the client and are
 unprivileged. Writes require root.
 """
 import glob
+import logging
 import os
+
+log = logging.getLogger("vantage.hardware")
 
 VPC_GLOB = "/sys/bus/platform/devices/VPC2004:*"
 
@@ -191,11 +194,15 @@ def read_attr(attr):
     """Read a VPC attribute as a stripped string, or None if unavailable."""
     path = vpc_path(attr)
     if not path:
+        log.debug("vpc attr %r: not present", attr)
         return None
     try:
         with open(path) as fh:
-            return fh.read().strip()
-    except OSError:
+            val = fh.read().strip()
+        log.debug("vpc attr %r = %r", attr, val)
+        return val
+    except OSError as exc:
+        log.debug("vpc attr %r: read error: %s", attr, exc)
         return None
 
 
@@ -272,7 +279,9 @@ def read_fan_rpms():
     (such as acpi_fan's stub) are skipped. Unprivileged.
     """
     fans = []
-    for inp in sorted(glob.glob("/sys/class/hwmon/hwmon*/fan*_input")):
+    inputs = sorted(glob.glob("/sys/class/hwmon/hwmon*/fan*_input"))
+    log.debug("hwmon fan inputs found: %s", inputs or "(none)")
+    for inp in inputs:
         try:
             with open(inp) as fh:
                 txt = fh.read().strip()
@@ -285,7 +294,10 @@ def read_fan_rpms():
                 label = fh.read().strip() or None
         except OSError:
             pass
+        log.debug("fan %s: %r = %d RPM", inp, label, rpm)
         fans.append((label, rpm))
+    if not fans:
+        log.debug("no readable fan RPM sensors found")
     return fans
 
 

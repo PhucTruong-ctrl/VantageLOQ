@@ -7,6 +7,8 @@ the gettext domain before calling main().
 """
 import argparse
 import logging
+import logging.handlers
+import os
 import sys
 
 import gi
@@ -51,6 +53,38 @@ class VantageApp(Adw.Application):
             self.win.present()
 
 
+LOG_FMT  = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
+LOG_DATE = "%H:%M:%S"
+
+
+def _log_path():
+    data_dir = GLib.get_user_data_dir()
+    return os.path.join(data_dir, "vantage", "vantage.log")
+
+
+def _setup_logging(debug: bool) -> str:
+    """Wire up logging. Always writes INFO+ to a rotating file; debug mode
+    additionally emits DEBUG to stderr. Returns the log file path."""
+    root = logging.getLogger("vantage")
+    root.setLevel(logging.DEBUG if debug else logging.INFO)
+
+    path = _log_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fh = logging.handlers.RotatingFileHandler(
+        path, maxBytes=1_000_000, backupCount=2, encoding="utf-8")
+    fh.setLevel(logging.DEBUG if debug else logging.INFO)
+    fh.setFormatter(logging.Formatter(LOG_FMT, datefmt=LOG_DATE))
+    root.addHandler(fh)
+
+    if debug:
+        sh = logging.StreamHandler(sys.stderr)
+        sh.setLevel(logging.DEBUG)
+        sh.setFormatter(logging.Formatter(LOG_FMT, datefmt=LOG_DATE))
+        root.addHandler(sh)
+
+    return path
+
+
 def main(version=None):
     parser = argparse.ArgumentParser(
         prog="vantage",
@@ -66,15 +100,12 @@ def main(version=None):
                             version="vantage %s" % version)
     args = parser.parse_args()
 
-    if args.debug:
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
-            datefmt="%H:%M:%S",
-            stream=sys.stderr,
-        )
-        log.setLevel(logging.DEBUG)
-        log.debug("debug logging enabled; tray_only=%s", args.tray)
+    log_path = _setup_logging(args.debug)
+    log.info("vantage %s starting (tray_only=%s, debug=%s)",
+             version or "dev", args.tray, args.debug)
+    log.debug("log file: %s", log_path)
+    from .client import Vantage
+    Vantage.set_log_path(log_path)
 
     app = VantageApp(tray_only=args.tray, version=version)
     # GApplication would otherwise try to parse our argv itself; pass an empty

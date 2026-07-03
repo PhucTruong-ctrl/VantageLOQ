@@ -126,6 +126,15 @@ def run(*args, timeout=None):
 class Vantage:
     """Backend facade. Construct once; call get_state()/set_*()."""
 
+    _log_path = None   # set by main._setup_logging() after construction
+
+    @classmethod
+    def set_log_path(cls, path):
+        cls._log_path = path
+
+    def log_path(self):
+        return self._log_path
+
     # ---- privileged helper plumbing ------------------------------------------
     @staticmethod
     def _helper(*args):
@@ -236,6 +245,7 @@ class Vantage:
         if gpu.available():
             state["gpu_mode"] = gpu.current_mode()
             state["gpu_applied"] = gpu.applied_mode()
+        log.debug("detected state: %s", state)
         return state
 
     # ---- privileged writes (via pkexec helper) -------------------------------

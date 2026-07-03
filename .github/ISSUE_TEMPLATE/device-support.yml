@@ -57,6 +57,8 @@ body:
       render: shell
       value: |
         # ---- copy from here, run in a terminal, paste the full output back ----
+        # Fish shell users: run `bash` first to enter a bash session, then paste
+        # the commands below, then type `exit` when done.
         {
           echo "### model";     cat /sys/class/dmi/id/product_name /sys/class/dmi/id/product_version
           echo "### kernel";    uname -r

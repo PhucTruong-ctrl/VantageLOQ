@@ -100,6 +100,13 @@ class VantageWindow(Adw.ApplicationWindow):
 
         self._build()
 
+        # Re-read all hardware state each time the window is shown (opened
+        # directly or via the tray — both go through present() → map), so changes
+        # made outside Vantage (keyboard backlight Fn hotkey, conservation mode,
+        # power profile, …) show up without clicking Refresh. Read-only, so no
+        # pkexec prompt.
+        self.connect("map", lambda *_a: self.refresh())
+
         # Single polkit prompt at launch; auth_admin_keep covers later writes.
         GLib.idle_add(self._authenticate)
 
@@ -339,7 +346,11 @@ class VantageWindow(Adw.ApplicationWindow):
 
         def current_idx(s):
             v = s.get("fan_mode")
-            return labels.index(FAN_LABELS[v]) if v in FAN_LABELS else None
+            if v not in FAN_LABELS:
+                if v is not None:
+                    log.warning("unknown fan_mode value %r — defaulting to index 0", v)
+                return 0
+            return labels.index(FAN_LABELS[v])
 
         idx = current_idx(self.state)
         if idx is not None:
@@ -677,6 +688,21 @@ class VantageWindow(Adw.ApplicationWindow):
         auto_row.set_active(autostart.is_enabled())
         auto_row.connect("notify::active", self._on_autostart_toggled)
         grp.add(auto_row)
+
+        log_path = self.backend.log_path()
+        if log_path:
+            log_row = Adw.ActionRow(
+                title=_("Log File"),
+                subtitle=log_path,
+            )
+            log_row.set_subtitle_selectable(True)
+            copy_btn = Gtk.Button(label=_("Copy Path"), valign=Gtk.Align.CENTER)
+            copy_btn.connect("clicked", lambda _b: (
+                self.get_clipboard().set(log_path),
+                self._toast(_("Log path copied to clipboard")),
+            ))
+            log_row.add_suffix(copy_btn)
+            grp.add(log_row)
 
         grp.set_margin_top(12)
         grp.set_margin_bottom(12)
