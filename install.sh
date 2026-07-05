@@ -12,6 +12,17 @@ get_polkit_pkg() {
     fi
 }
 
+# Resolve the pkg-config package name for apt-based distros.
+# Debian/Ubuntu now ship "pkg-config" as a transitional package for "pkgconf";
+# fall back to "pkgconf" directly if the transitional one is gone.
+get_pkgconfig_pkg() {
+    if apt-cache show pkg-config &>/dev/null; then
+        echo "pkg-config"
+    else
+        echo "pkgconf"
+    fi
+}
+
 # Function to detect package manager
 detect_package_manager() {
     if command -v pacman &> /dev/null; then
@@ -42,29 +53,29 @@ case $distro in
   # Now Vantage can be installed on Cachy OS, ArcoLinux... you name it!
   "arch")
     echo "Installing on Arch Linux or derivative"
-    pacman -Qi python-gobject gtk4 libadwaita polkit networkmanager meson ninja gettext glib2 appstream &> /dev/null || sudo pacman -S python-gobject gtk4 libadwaita polkit networkmanager meson ninja gettext glib2 appstream
+    pacman -Qi python-gobject gtk4 libadwaita polkit networkmanager pkgconf meson ninja gettext glib2 appstream &> /dev/null || sudo pacman -S python-gobject gtk4 libadwaita polkit networkmanager pkgconf meson ninja gettext glib2 appstream
     ;;
 
   # Now Vantage can not only be installed on Ubuntu or POP OS but also Kubuntu, KDE Neon, Xubuntu...
   "debian")
     echo "Installing on Debian or derivative"
-    dpkg -s python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 $(get_polkit_pkg) meson ninja-build gettext libglib2.0-bin appstream &> /dev/null || sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 $(get_polkit_pkg) meson ninja-build gettext libglib2.0-bin appstream
+    dpkg -s python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 $(get_polkit_pkg) $(get_pkgconfig_pkg) meson ninja-build gettext libglib2.0-bin appstream &> /dev/null || sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 $(get_polkit_pkg) $(get_pkgconfig_pkg) meson ninja-build gettext libglib2.0-bin appstream
     ;;
 
   # Entry for Linux Mint 21.3 Edge
   "ubuntu debian")
     echo "Installing on Linux Mint Edge"
-    dpkg -s python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 $(get_polkit_pkg) meson ninja-build gettext libglib2.0-bin appstream &> /dev/null || sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 $(get_polkit_pkg) meson ninja-build gettext libglib2.0-bin appstream
+    dpkg -s python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 $(get_polkit_pkg) $(get_pkgconfig_pkg) meson ninja-build gettext libglib2.0-bin appstream &> /dev/null || sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 $(get_polkit_pkg) $(get_pkgconfig_pkg) meson ninja-build gettext libglib2.0-bin appstream
     ;;
 
   "fedora")
     echo "Installing on Fedora"
-    rpm -q python3-gobject gtk4 libadwaita polkit NetworkManager pipewire-pulseaudio meson ninja-build gettext glib2-devel appstream &> /dev/null || sudo dnf install python3-gobject gtk4 libadwaita polkit NetworkManager pipewire-pulseaudio meson ninja-build gettext glib2-devel appstream
+    rpm -q python3-gobject gtk4 libadwaita polkit NetworkManager pipewire-pulseaudio pkgconf-pkg-config meson ninja-build gettext glib2-devel appstream &> /dev/null || sudo dnf install python3-gobject gtk4 libadwaita polkit NetworkManager pipewire-pulseaudio pkgconf-pkg-config meson ninja-build gettext glib2-devel appstream
     ;;
 
   "opensuse-tumbleweed")
     echo "Installing on OpenSuse"
-    rpm -q python3-gobject gtk4 libadwaita typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1 polkit NetworkManager pipewire-pulseaudio meson ninja gettext-tools glib2-tools appstream &> /dev/null || sudo zypper install python3-gobject gtk4 libadwaita typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1 polkit NetworkManager pipewire-pulseaudio meson ninja gettext-tools glib2-tools appstream
+    rpm -q python3-gobject gtk4 libadwaita typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1 polkit NetworkManager pipewire-pulseaudio pkgconf-pkg-config meson ninja gettext-tools glib2-tools appstream &> /dev/null || sudo zypper install python3-gobject gtk4 libadwaita typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1 polkit NetworkManager pipewire-pulseaudio pkgconf-pkg-config meson ninja gettext-tools glib2-tools appstream
     ;;
 
   *)
@@ -74,19 +85,19 @@ case $distro in
     case $package_manager in
         "pacman")
             echo "Detected pacman package manager"
-            pacman -Qi python-gobject gtk4 libadwaita polkit networkmanager meson ninja gettext glib2 appstream &> /dev/null || sudo pacman -S python-gobject gtk4 libadwaita polkit networkmanager meson ninja gettext glib2 appstream
+            pacman -Qi python-gobject gtk4 libadwaita polkit networkmanager pkgconf meson ninja gettext glib2 appstream &> /dev/null || sudo pacman -S python-gobject gtk4 libadwaita polkit networkmanager pkgconf meson ninja gettext glib2 appstream
             ;;
         "apt")
             echo "Detected apt package manager"
-            dpkg -s python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 $(get_polkit_pkg) meson ninja-build gettext libglib2.0-bin appstream &> /dev/null || sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 $(get_polkit_pkg) meson ninja-build gettext libglib2.0-bin appstream
+            dpkg -s python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 $(get_polkit_pkg) $(get_pkgconfig_pkg) meson ninja-build gettext libglib2.0-bin appstream &> /dev/null || sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 $(get_polkit_pkg) $(get_pkgconfig_pkg) meson ninja-build gettext libglib2.0-bin appstream
             ;;
         "dnf")
             echo "Detected dnf package manager"
-            rpm -q python3-gobject gtk4 libadwaita polkit NetworkManager pipewire-pulseaudio meson ninja-build gettext glib2-devel appstream &> /dev/null || sudo dnf install python3-gobject gtk4 libadwaita polkit NetworkManager pipewire-pulseaudio meson ninja-build gettext glib2-devel appstream
+            rpm -q python3-gobject gtk4 libadwaita polkit NetworkManager pipewire-pulseaudio pkgconf-pkg-config meson ninja-build gettext glib2-devel appstream &> /dev/null || sudo dnf install python3-gobject gtk4 libadwaita polkit NetworkManager pipewire-pulseaudio pkgconf-pkg-config meson ninja-build gettext glib2-devel appstream
             ;;
         "zypper")
             echo "Detected zypper package manager"
-            rpm -q python3-gobject gtk4 libadwaita typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1 polkit NetworkManager pipewire-pulseaudio meson ninja gettext-tools glib2-tools appstream &> /dev/null || sudo zypper install python3-gobject gtk4 libadwaita typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1 polkit NetworkManager pipewire-pulseaudio meson ninja gettext-tools glib2-tools appstream
+            rpm -q python3-gobject gtk4 libadwaita typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1 polkit NetworkManager pipewire-pulseaudio pkgconf-pkg-config meson ninja gettext-tools glib2-tools appstream &> /dev/null || sudo zypper install python3-gobject gtk4 libadwaita typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1 polkit NetworkManager pipewire-pulseaudio pkgconf-pkg-config meson ninja gettext-tools glib2-tools appstream
             ;;
         *)
             echo "Unable to detect compatible package manager, exiting."
