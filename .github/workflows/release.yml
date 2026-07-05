@@ -60,7 +60,7 @@ jobs:
             --depends "gir1.2-gtk-4.0" \
             --depends "gir1.2-adw-1" \
             --depends "libadwaita-1-0" \
-            --depends "policykit-1" \
+            --depends "pkexec | policykit-1" \
             --depends "network-manager" \
             --after-install .github/packaging/deb-postinst.sh \
             --after-remove .github/packaging/deb-postrm.sh \
