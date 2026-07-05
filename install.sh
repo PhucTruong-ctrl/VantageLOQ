@@ -1,5 +1,17 @@
 #!/bin/bash
 
+# Resolve the correct polkit package name(s) for apt-based distros.
+# Ubuntu 24.04+ / 26.04 dropped the transitional "policykit-1" package,
+# which was split into "polkitd" (daemon) + "pkexec" (setuid helper).
+# Older Debian/Ubuntu still only ship "policykit-1".
+get_polkit_pkg() {
+    if apt-cache show polkitd &>/dev/null; then
+        echo "polkitd pkexec"
+    else
+        echo "policykit-1"
+    fi
+}
+
 # Function to detect package manager
 detect_package_manager() {
     if command -v pacman &> /dev/null; then
@@ -36,13 +48,13 @@ case $distro in
   # Now Vantage can not only be installed on Ubuntu or POP OS but also Kubuntu, KDE Neon, Xubuntu...
   "debian")
     echo "Installing on Debian or derivative"
-    dpkg -s python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 policykit-1 meson ninja-build gettext libglib2.0-bin appstream &> /dev/null || sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 policykit-1 meson ninja-build gettext libglib2.0-bin appstream
+    dpkg -s python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 $(get_polkit_pkg) meson ninja-build gettext libglib2.0-bin appstream &> /dev/null || sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 $(get_polkit_pkg) meson ninja-build gettext libglib2.0-bin appstream
     ;;
 
   # Entry for Linux Mint 21.3 Edge
   "ubuntu debian")
     echo "Installing on Linux Mint Edge"
-    dpkg -s python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 policykit-1 meson ninja-build gettext libglib2.0-bin appstream &> /dev/null || sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 policykit-1 meson ninja-build gettext libglib2.0-bin appstream
+    dpkg -s python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 $(get_polkit_pkg) meson ninja-build gettext libglib2.0-bin appstream &> /dev/null || sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 $(get_polkit_pkg) meson ninja-build gettext libglib2.0-bin appstream
     ;;
 
   "fedora")
@@ -66,7 +78,7 @@ case $distro in
             ;;
         "apt")
             echo "Detected apt package manager"
-            dpkg -s python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 policykit-1 meson ninja-build gettext libglib2.0-bin appstream &> /dev/null || sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 policykit-1 meson ninja-build gettext libglib2.0-bin appstream
+            dpkg -s python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 $(get_polkit_pkg) meson ninja-build gettext libglib2.0-bin appstream &> /dev/null || sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 $(get_polkit_pkg) meson ninja-build gettext libglib2.0-bin appstream
             ;;
         "dnf")
             echo "Detected dnf package manager"
