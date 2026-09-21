@@ -96,6 +96,95 @@ def write_platform_profile(value):
     with open(PLATFORM_PROFILE, "w") as fh:
         fh.write(value)
     return True
+# The kernel's global platform_profile interface only *reports* the firmware's
+# "custom" mode — it refuses to select it (EINVAL). The EC-native powermode
+# attribute of the legion driver accepts every mode, custom included, so it is
+# the preferred write path when present.
+POWERMODE_VALUES = {
+    "low-power": 1,
+    "balanced": 2,
+    "performance": 3,
+    "max-power": 224,
+    "custom": 255,
+}
+
+
+def powermode_path():
+    """Return the legion driver's EC powermode attribute, or None."""
+    for path in sorted(glob.glob("/sys/devices/platform/*/powermode")):
+        if os.path.exists(path):
+            log.debug("powermode attr=%s", path)
+            return path
+    log.debug("powermode attr=None")
+    return None
+
+
+def powermode_available():
+    return powermode_path() is not None
+
+
+def _legion_attr(name):
+    for path in sorted(glob.glob("/sys/devices/platform/*/%s" % name)):
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def fan_fullspeed_available():
+    return _legion_attr("fan_fullspeed") is not None
+
+
+def read_fan_fullspeed():
+    """Return the EC's 'both fans at full speed' flag, or None if unavailable."""
+    path = _legion_attr("fan_fullspeed")
+    if not path:
+        return None
+    try:
+        with open(path) as fh:
+            return fh.read().strip() == "1"
+    except OSError:
+        return None
+
+
+def write_fan_fullspeed(enabled):
+    """Force both fans to full speed (or hand them back to the curve).
+
+    Unlike a fan-curve write this is a single EC flag the firmware honours
+    directly, so it is the dependable way to spin the fans up.
+    """
+    path = _legion_attr("fan_fullspeed")
+    if not path:
+        return False
+    try:
+        with open(path, "w") as fh:
+            fh.write("1" if enabled else "0")
+    except OSError:
+        log.debug("fan_fullspeed write failed")
+        return False
+    log.debug("fan_fullspeed -> %s", bool(enabled))
+    return True
+
+
+def write_powermode(name):
+    """Select a thermal mode through the EC-native attribute.
+
+    Accepts the same names as platform_profile (low-power, balanced,
+    performance, max-power, custom) and returns False for anything unknown or
+    unwritable, so callers never claim a mode change that did not happen.
+    """
+    value = POWERMODE_VALUES.get(name)
+    path = powermode_path()
+    if value is None or path is None:
+        log.debug("powermode write refused: name=%r path=%r", name, path)
+        return False
+    try:
+        with open(path, "w") as fh:
+            fh.write(str(value))
+    except OSError:
+        log.debug("powermode write failed for %r", name)
+        return False
+    log.debug("powermode %r -> %d", name, value)
+    return True
 
 
 # ---- ThinkPad BIOS settings via think_lmi (firmware-attributes) --------------
@@ -288,20 +377,156 @@ def is_loq_15iax9():
     return machine_type() == "83GS"
 
 
-def use_platform_thermal_profile():
-    """True if ACPI platform_profile is the authoritative persistent thermal mode.
+def platform_profile_provider():
+    for path in sorted(glob.glob("/sys/class/platform-profile/platform-profile-*/name")):
+        try:
+            with open(path) as fh:
+                name = fh.read().strip()
+            if name:
+                log.debug("platform profile provider=%r", name)
+                return name
+        except OSError:
+            continue
+    log.debug("platform profile provider=None")
+    return None
 
-    On these machines fan_mode is not a trustworthy persistent-state interface
-    (writes read back as 0), so the UI must offer platform_profile instead and
-    hide the generic Fan Mode selector. RPM telemetry is unaffected.
-    Additionally logs the detected DMI identity and the chosen backend at debug
-    level, so one refresh is enough to tell from a log which path was taken.
-    """
-    use_profile = is_loq_15iax9() and os.path.exists(PLATFORM_PROFILE)
-    log.debug("DMI product_name=%r product_version=%r -> thermal backend: %s",
-              machine_type(), read_dmi("product_version"),
+
+def use_platform_thermal_profile():
+    """Return whether the generic platform-profile backend is available."""
+    provider = platform_profile_provider()
+    use_profile = (provider is not None
+                   and provider.lower() == "lenovo-legion"
+                   and os.path.exists(PLATFORM_PROFILE))
+    log.debug("DMI product_name=%r product_version=%r provider=%r -> thermal backend: %s",
+              machine_type(), read_dmi("product_version"), provider,
               "platform_profile" if use_profile else "fan_mode")
     return use_profile
+
+
+def fan_curve_dir():
+    for name_path in sorted(glob.glob("/sys/class/hwmon/hwmon*/name")):
+        directory = os.path.dirname(name_path)
+        try:
+            with open(name_path) as fh:
+                name = fh.read().strip()
+            if (name == "legion_hwmon"
+                    and os.path.exists(os.path.join(directory, "pwm1_auto_point1_pwm"))
+                    and os.path.exists(os.path.join(directory, "pwm2_auto_point1_pwm"))):
+                log.debug("fan curve dir=%s", directory)
+                return directory
+        except OSError:
+            continue
+    log.debug("fan curve dir=None")
+    return None
+
+
+CURVE_FIELDS = ("fan1_pwm", "fan2_pwm", "cpu_temp", "cpu_hyst", "gpu_temp", "gpu_hyst")
+
+
+def read_fan_curve():
+    directory = fan_curve_dir()
+    if not directory:
+        return []
+    points = []
+    try:
+        for point in range(1, 11):
+            values = {}
+            for key, prefix, suffix in (
+                ("fan1_pwm", "pwm1", "pwm"), ("fan2_pwm", "pwm2", "pwm"),
+                ("cpu_temp", "pwm1", "temp"), ("cpu_hyst", "pwm1", "temp_hyst"),
+                ("gpu_temp", "pwm2", "temp"), ("gpu_hyst", "pwm2", "temp_hyst")):
+                with open(os.path.join(directory, "%s_auto_point%d_%s" %
+                                       (prefix, point, suffix))) as fh:
+                    values[key] = int(fh.read().strip())
+            points.append(values)
+    except (OSError, ValueError):
+        log.debug("fan curve read failed")
+        return []
+    log.debug("fan curve read count=%d", len(points))
+    return points
+
+
+def write_fan_curve(points, attempts=3):
+    """Write the curve and verify the EC kept it.
+
+    The driver's hwmon store is read-modify-write *per attribute*: every single
+    write re-reads the whole curve from the EC and writes it all back, so a
+    later attribute can revert an earlier one from a stale read. Measured on a
+    LOQ 15IAX9, that silently drops some points while the store still returns
+    success. So the write is retried and then verified against the readback:
+    this returns True only when every value that actually needed changing stuck.
+    """
+    try:
+        if not isinstance(points, list) or len(points) != 10:
+            raise ValueError("expected 10 points")
+        for index, point in enumerate(points):
+            if not isinstance(point, dict) or any(key not in point for key in CURVE_FIELDS):
+                raise ValueError("missing curve field")
+            values = {key: int(point[key]) for key in CURVE_FIELDS}
+            if not (0 <= values["fan1_pwm"] <= 255 and 0 <= values["fan2_pwm"] <= 255):
+                raise ValueError("PWM out of range")
+            for key in ("cpu_temp", "cpu_hyst", "gpu_temp", "gpu_hyst"):
+                if not 0 <= values[key] <= 127:
+                    raise ValueError("temperature out of range")
+            if values["cpu_hyst"] > values["cpu_temp"] or values["gpu_hyst"] > values["gpu_temp"]:
+                raise ValueError("hysteresis exceeds temperature")
+            if index and (values["cpu_temp"] < previous["cpu_temp"]
+                          or values["gpu_temp"] < previous["gpu_temp"]):
+                raise ValueError("temperatures not monotonic")
+            previous = values
+        directory = fan_curve_dir()
+        if not directory:
+            raise OSError("curve unavailable")
+
+        before = read_fan_curve()
+        if len(before) != 10:
+            raise OSError("curve unavailable")
+        # Only fields the caller actually changes can be verified: an unchanged
+        # field may legitimately read back as anything the EC already had.
+        intended = [(index, key) for index, point in enumerate(points)
+                    for key in CURVE_FIELDS
+                    if _curve_close(int(point[key]), before[index][key]) is False]
+
+        for attempt in range(max(1, attempts)):
+            for index, point in enumerate(points, 1):
+                for key, prefix, suffix in (
+                    ("fan1_pwm", "pwm1", "pwm"), ("fan2_pwm", "pwm2", "pwm"),
+                    ("cpu_temp", "pwm1", "temp"), ("cpu_hyst", "pwm1", "temp_hyst"),
+                    ("gpu_temp", "pwm2", "temp"), ("gpu_hyst", "pwm2", "temp_hyst")):
+                    with open(os.path.join(directory, "%s_auto_point%d_%s" %
+                                           (prefix, index, suffix)), "w") as fh:
+                        fh.write(str(int(point[key])))
+            if not intended:
+                return True
+            after = read_fan_curve()
+            if len(after) != 10:
+                continue
+            missing = [(index, key) for index, key in intended
+                       if _curve_close(int(points[index][key]),
+                                       after[index][key]) is False]
+            if not missing:
+                return True
+            log.debug("fan curve attempt %d: EC ignored %s", attempt + 1, missing)
+    except (OSError, ValueError, TypeError):
+        log.debug("fan curve write rejected")
+        return False
+    return False
+
+
+def _curve_close(want, got):
+    """True if `got` is the EC's stored form of `want`.
+
+    Fan speeds are stored as RPM/100 (unit 3, 10000 RPM full scale), so a PWM
+    request comes back quantised; anything else must match exactly.
+    """
+    if want == got:
+        return True
+    speed = min(255, (want * 10000 + 100 * 255 - 1) // (100 * 255))
+    return abs(speed * 255 * 100 // 10000 - got) <= 2
+
+
+def fan_curve_available():
+    return bool(fan_curve_dir())
 
 
 def read_fan_rpms():

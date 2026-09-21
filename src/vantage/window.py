@@ -12,6 +12,7 @@ This module defines only the window; the GApplication and CLI entry point live
 in main.py.
 """
 import logging
+import math
 from gettext import gettext as _
 
 import gi
@@ -19,7 +20,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, Gio, Gtk, GLib  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, Gtk, GLib  # noqa: E402
 
 from . import autostart  # noqa: E402
 from .client import (  # noqa: E402
@@ -46,6 +47,124 @@ PROFILE_LABELS = {
 }
 
 
+# Fan-curve PWM (0-255) <-> the percentage the simple curve view shows.
+def _pwm_to_pct(pwm):
+    return int(round(pwm * 100 / 255.0))
+
+
+def _pct_to_pwm(pct):
+    return int(round(pct * 255 / 100.0))
+
+
+class FanCurveCanvas(Gtk.DrawingArea):
+    """Fan-curve graph with ten points the user drags directly.
+
+    Values are Fan 1 percentages (0-100) snapped to a 10 % grid, matching the
+    Low / 20 % … / High columns under the graph. The advanced grid stays the raw
+    editor for every field, so this widget only ever drives Fan 1 PWM.
+    Keyboard: focus, Left/Right pick a point, Up/Down move it one grid step.
+    """
+
+    STEP = 10
+
+    def __init__(self, percents, on_change):
+        super().__init__()
+        self._values = [self._snap(p) for p in percents]
+        self._on_change = on_change
+        self._active = 0
+        self._start_y = 0.0
+        self.set_size_request(-1, 200)
+        self.set_hexpand(True)
+        self.set_vexpand(True)
+        self.set_focusable(True)
+        self.set_tooltip_text(_("Drag a point to set the fan speed "
+                                "(snaps to 10 % steps)"))
+        self.set_draw_func(self._draw)
+        drag = Gtk.GestureDrag()
+        drag.connect("drag-begin", self._drag_begin)
+        drag.connect("drag-update", self._drag_update)
+        self.add_controller(drag)
+        key = Gtk.EventControllerKey()
+        key.connect("key-pressed", self._on_key)
+        self.add_controller(key)
+
+    def _snap(self, percent):
+        return max(0, min(100, int(round(percent / self.STEP)) * self.STEP))
+
+    def values(self):
+        return list(self._values)
+
+    def set_values(self, percents):
+        self._values = [self._snap(p) for p in percents]
+        self.queue_draw()
+
+    def set_value(self, index, percent):
+        self._values[index] = self._snap(percent)
+        self.queue_draw()
+
+    def _point_xy(self, index, width, height):
+        return ((index + 0.5) * width / 10.0,
+                height - (self._values[index] / 100.0) * height)
+
+    def _nearest_index(self, x, width):
+        return max(0, min(9, int(x * 10 / max(width, 1))))
+
+    def _apply(self, index, percent):
+        snapped = self._snap(percent)
+        if snapped == self._values[index]:
+            return
+        self._values[index] = snapped
+        self.queue_draw()
+        self._on_change(index, snapped)
+
+    def _drag_begin(self, _gesture, x, _y):
+        width, height = self.get_width(), self.get_height()
+        self.grab_focus()
+        self._active = self._nearest_index(x, width)
+        _px, self._start_y = self._point_xy(self._active, width, height)
+        self.queue_draw()
+
+    def _drag_update(self, _gesture, _offset_x, offset_y):
+        height = max(self.get_height(), 1)
+        self._apply(self._active, (height - (self._start_y + offset_y))
+                    / height * 100.0)
+
+    def _on_key(self, _controller, keyval, _code, _state):
+        if keyval in (Gdk.KEY_Left, Gdk.KEY_Right):
+            self._active = max(0, min(9, self._active +
+                                      (-1 if keyval == Gdk.KEY_Left else 1)))
+            self.queue_draw()
+            return True
+        if keyval in (Gdk.KEY_Up, Gdk.KEY_Down):
+            step = self.STEP if keyval == Gdk.KEY_Up else -self.STEP
+            self._apply(self._active, self._values[self._active] + step)
+            return True
+        return False
+
+    def _draw(self, _area, cr, width, height):
+        colour = self.get_color()
+        for step in range(0, 101, self.STEP):
+            y = height - step / 100.0 * height
+            cr.set_source_rgba(colour.red, colour.green, colour.blue, 0.10)
+            cr.set_line_width(1)
+            cr.move_to(0, y)
+            cr.line_to(width, y)
+            cr.stroke()
+        points = [self._point_xy(i, width, height) for i in range(10)]
+        cr.set_source_rgba(colour.red, colour.green, colour.blue, 0.55)
+        cr.set_line_width(2)
+        cr.move_to(*points[0])
+        for x, y in points[1:]:
+            cr.line_to(x, y)
+        cr.stroke()
+        for index, (x, y) in enumerate(points):
+            active = index == self._active and self.has_focus()
+            cr.set_source_rgba(colour.red, colour.green, colour.blue,
+                               1.0 if index == self._active else 0.7)
+            cr.arc(x, y, 7 if active else 5, 0, 2 * math.pi)
+            cr.fill()
+
+
 class VantageWindow(Adw.ApplicationWindow):
     def __init__(self, app, backend, config):
         super().__init__(application=app, title=_("Lenovo Vantage"))
@@ -60,6 +179,7 @@ class VantageWindow(Adw.ApplicationWindow):
         self._fan_timer_id = 0     # live fan poll source id (0 = stopped)
         self._fan_hold_id = 0      # watchdog re-arm source id (0 = stopped)
         self._fan_hold_level = None  # manual fan level to keep alive, or None
+        self._fan_curve_window = None
         self._bios_inits = []      # deferred BIOS value reads (run after auth)
         self.state = backend.get_state()
 
@@ -174,6 +294,12 @@ class VantageWindow(Adw.ApplicationWindow):
             self._add_power_profile(thermal, thermal_mode=True)
         if "fan_rpms" in st:
             self._add_fan_speed(thermal)
+        if "fan_fullspeed" in st:
+            self._switch(thermal, "fan_fullspeed", _("Maximum Fan Speed"),
+                         _("Run both fans at full speed — the EC still caps "
+                           "them by temperature"),
+                         lambda s: s.get("fan_fullspeed") == "1",
+                         self.backend.set_fan_fullspeed)
         self._maybe_add(thermal)
 
         graphics = self._group(_("Graphics"))
@@ -624,18 +750,216 @@ class VantageWindow(Adw.ApplicationWindow):
                 charge += " (%s)" % status
             parts.append(charge)
         return " · ".join(parts) or _("Unavailable")
-
     def _add_fan_speed(self, group):
         group._has_rows = True
         self._fan_row = Adw.ActionRow(title=_("Fan Speed"),
                                       subtitle=self._fan_text(self.backend.fan_rpms()))
         self._fan_row.add_css_class("property")
+        if self.backend.fan_curve_available():
+            tune = Gtk.Button(label=_("Tune"), valign=Gtk.Align.CENTER)
+            tune.set_tooltip_text(_("Customize fan curve"))
+            tune.connect("clicked", self._show_fan_curve)
+            self._fan_row.add_suffix(tune)
         group.add(self._fan_row)
-        # Live tachometer poll (every 2s), but only while the window is on screen —
-        # no point waking the CPU every 2s when hidden in the tray. map/unmap also
-        # ensures the timer is torn down with the window (no leaked source).
         self.connect("map", lambda *_a: self._start_fan_poll())
         self.connect("unmap", lambda *_a: self._stop_fan_poll())
+
+    def _show_fan_curve(self, *_args):
+        if self._fan_curve_window is not None:
+            self._fan_curve_window.present()
+            return
+
+        def loaded(curve):
+            if isinstance(curve, BaseException) or not isinstance(curve, (list, tuple)) or len(curve) != 10:
+                self._toast(_("Fan curve is unavailable"))
+                return
+            self._build_fan_curve_window(curve)
+
+        self.backend.call_async(self.backend.fan_curve, loaded)
+
+    @staticmethod
+    def _curve_point(point):
+        keys = ("fan1_pwm", "fan2_pwm", "cpu_temp", "cpu_hyst", "gpu_temp", "gpu_hyst")
+        if isinstance(point, dict):
+            return tuple(int(point.get(k, 0)) for k in keys)
+        return tuple(int(v) for v in point[:6])
+
+    def _build_fan_curve_window(self, curve):
+        try:
+            original = [self._curve_point(p) for p in curve]
+        except (TypeError, ValueError, IndexError):
+            self._toast(_("Fan curve is unavailable"))
+            return
+        if len(original) != 10:
+            self._toast(_("Fan curve is unavailable"))
+            return
+
+        win = Adw.Window(transient_for=self, modal=True, title=_("Fan Speed Custom"))
+        win.set_default_size(720, 640)
+        win.connect("close-request", self._fan_curve_closed)
+        self._fan_curve_window = win
+
+        # Feedback has to live in *this* window: the main window's toast overlay
+        # sits behind the modal editor, so its toasts are invisible here.
+        overlay = Adw.ToastOverlay()
+        toolbar = Adw.ToolbarView()
+        toolbar.add_top_bar(Adw.HeaderBar())
+        overlay.set_child(toolbar)
+        win.set_content(overlay)
+
+        def toast(message):
+            overlay.add_toast(Adw.Toast(title=message))
+
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        content.set_margin_top(12)
+        content.set_margin_bottom(12)
+        content.set_margin_start(16)
+        content.set_margin_end(16)
+        title = Gtk.Label(label=_("Fan Speed Custom"), xalign=0)
+        title.add_css_class("title-2")
+        subtitle = Gtk.Label(label=_("Adjust fan speed in different temperature ranges"),
+                             xalign=0)
+        subtitle.add_css_class("dim-label")
+        content.append(title)
+        content.append(subtitle)
+        telemetry = Gtk.Label(label=self._fan_text(self.backend.fan_rpms()),
+                              xalign=0)
+        telemetry.add_css_class("dim-label")
+        content.append(telemetry)
+
+        # Simple view: drag the curve, snapped to the 10 % grid. The advanced
+        # grid below stays the source of truth for all six fields, so Fan 2 PWM
+        # and the hysteresis values survive a normal-mode Apply.
+        marks = ["Low"] + ["%d%%" % pct for pct in range(20, 100, 10)] + ["High"]
+        syncing = [False]
+
+        def on_curve(index, percent):
+            if syncing[0]:
+                return
+            syncing[0] = True
+            spins[index][0].set_value(_pct_to_pwm(percent))
+            syncing[0] = False
+
+        canvas = FanCurveCanvas([_pwm_to_pct(point[0]) for point in original],
+                                on_curve)
+        content.append(canvas)
+        axis = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        axis.set_homogeneous(True)
+        for label in marks:
+            mark = Gtk.Label(label=label)
+            mark.add_css_class("dim-label")
+            axis.append(mark)
+        content.append(axis)
+
+        advanced = Gtk.ToggleButton(label=_("Advanced"))
+        advanced.set_tooltip_text(_("Edit temperatures, Fan 2 and hysteresis"))
+        reveal = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_DOWN)
+        advanced.bind_property("active", reveal, "reveal-child")
+
+        scroll = Gtk.ScrolledWindow(vexpand=True)
+        grid = Gtk.Grid(column_spacing=8, row_spacing=5)
+        headings = (_("Point"), _("CPU max °C"), _("CPU Fan PWM"), _("CPU Hyst"),
+                    _("GPU max °C"), _("GPU Fan PWM"), _("GPU Hyst"))
+        for col, label in enumerate(headings):
+            h = Gtk.Label(label=label, xalign=0)
+            h.set_tooltip_text(label)
+            grid.attach(h, col, 0, 1, 1)
+        spins = []
+        for row_num, point in enumerate(original, 1):
+            values = list(point)
+            grid.attach(Gtk.Label(label=str(row_num), xalign=0), 0, row_num, 1, 1)
+            row_spins = []
+            for col, (value, upper) in enumerate(zip(values, (255, 255, 127, 127, 127, 127)), 1):
+                spin = Gtk.SpinButton(adjustment=Gtk.Adjustment.new(value, 0, upper, 1, 5, 0),
+                                      numeric=True, valign=Gtk.Align.CENTER)
+                spin.set_tooltip_text(headings[col])
+                grid.attach(spin, col, row_num, 1, 1)
+                row_spins.append(spin)
+            spins.append(row_spins)
+        scroll.set_child(grid)
+        reveal.set_child(scroll)
+        content.append(advanced)
+        content.append(reveal)
+
+        syncing = [False]
+
+        def on_spin(spin, index):
+            if syncing[0]:
+                return
+            syncing[0] = True
+            canvas.set_value(index, _pwm_to_pct(int(spin.get_value())))
+            syncing[0] = False
+
+        for index, row_spins in enumerate(spins):
+            row_spins[0].connect("value-changed", on_spin, index)
+
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+                          halign=Gtk.Align.END)
+        reset = Gtk.Button(label=_("Reset"))
+        cancel = Gtk.Button(label=_("Cancel"))
+        apply = Gtk.Button(label=_("Apply"))
+        apply.add_css_class("suggested-action")
+        for button in (reset, cancel, apply):
+            button.set_focusable(True)
+        actions.append(reset)
+        actions.append(cancel)
+        actions.append(apply)
+        content.append(actions)
+        toolbar.set_content(content)
+
+        def put_values(values):
+            syncing[0] = True
+            for row_spins, point in zip(spins, values):
+                for spin, value in zip(row_spins, point):
+                    spin.set_value(value)
+            canvas.set_values([_pwm_to_pct(point[0]) for point in values])
+            syncing[0] = False
+
+        reset.connect("clicked", lambda _b: put_values(original))
+        cancel.connect("clicked", lambda _b: win.close())
+
+        def submit(_button):
+            values = [tuple(int(spin.get_value()) for spin in row) for row in spins]
+            valid = all(0 <= value <= upper
+                        for point in values
+                        for value, upper in zip(point, (255, 255, 127, 127, 127, 127)))
+            valid = valid and all(values[i][2] >= values[i - 1][2] and
+                                  values[i][4] >= values[i - 1][4] and
+                                  values[i][3] <= values[i][2] and
+                                  values[i][5] <= values[i][4]
+                                  for i in range(1, 10))
+            if not valid:
+                toast(_("Fan curve not applied — check the advanced values"))
+                return
+            apply.set_sensitive(False)
+            apply.set_label(_("Applying…"))
+
+            def done(result):
+                apply.set_sensitive(True)
+                apply.set_label(_("Apply"))
+
+                def reloaded(curve):
+                    # Show what the EC actually stored: the driver's store can
+                    # silently drop points, so the editor must never keep
+                    # displaying a curve the hardware did not accept.
+                    if isinstance(curve, (list, tuple)) and len(curve) == 10:
+                        put_values([self._curve_point(point) for point in curve])
+                    if result is True:
+                        toast(_("Fan curve applied"))
+                    else:
+                        toast(_("The EC kept only part of the curve — "
+                                "showing what it stored"))
+                    self.refresh()
+
+                self.backend.call_async(self.backend.fan_curve, reloaded)
+            self.backend.call_async(lambda: self.backend.set_fan_curve(values), done)
+
+        apply.connect("clicked", submit)
+        win.present()
+
+    def _fan_curve_closed(self, *_args):
+        self._fan_curve_window = None
+        return False
 
     def _start_fan_poll(self):
         if getattr(self, "_fan_row", None) is None or self._fan_timer_id:

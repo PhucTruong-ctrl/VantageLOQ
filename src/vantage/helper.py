@@ -13,6 +13,7 @@ Usage:
   vantage-helper bios-get <attr>           # read a whitelisted think_lmi BIOS attr
   vantage-helper bios-set <attr> <value>   # write a whitelisted think_lmi BIOS attr
 """
+import json
 import sys
 
 from . import gpu
@@ -67,9 +68,34 @@ def _set(key, value):
                 "vantage-helper: platform_profile %r rejected: %s\n"
                 % (value, exc))
             return False
+    if key == "powermode":
+        if value not in hw.POWERMODE_VALUES:
+            sys.stderr.write("vantage-helper: unknown powermode %r\n" % value)
+            return False
+        if not hw.write_powermode(value):
+            sys.stderr.write("vantage-helper: powermode %r rejected\n" % value)
+            return False
+        return True
+
+    if key == "fan_fullspeed":
+        if value not in ("0", "1"):
+            sys.stderr.write("vantage-helper: fan_fullspeed wants 0 or 1\n")
+            return False
+        if not hw.write_fan_fullspeed(value == "1"):
+            sys.stderr.write("vantage-helper: fan_fullspeed rejected\n")
+            return False
+        return True
+
+    if key == "fan_curve":
+        try:
+            points = json.loads(value)
+            if not isinstance(points, list):
+                raise ValueError("expected list")
+            return hw.write_fan_curve(points)
+        except (ValueError, TypeError, json.JSONDecodeError):
+            sys.stderr.write("vantage-helper: rejected fan_curve JSON\n")
+            return False
     if key == "fan_level":
-        # write_fan_level validates against hw.FAN_LEVELS and the fan_control
-        # gate, so the value is already constrained.
         return hw.write_fan_level(value)
     if key == "touchpad_inhibited":
         return hw.write_touchpad_inhibited(value.lower() not in FALSEY)

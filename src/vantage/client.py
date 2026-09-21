@@ -12,6 +12,7 @@ State is returned as a flat dict of strings; a key is present only when the
 underlying control exists on this machine, so front-ends just render the keys
 they get back.
 """
+import json
 import logging
 import os
 import platform
@@ -141,6 +142,10 @@ class Vantage:
         """Build the `pkexec vantage-helper ...` argv (dev falls back to source)."""
         installed = shutil.which(HELPER)
         if installed:
+            # Worth logging: the app talks to the *installed* helper, which is
+            # polkit-pinned to that path. A stale install silently rejects keys
+            # added in the source tree, so name the binary in every log.
+            log.debug("helper binary: %s", installed)
             return ["pkexec", installed, *args]
         # Uninstalled run: invoke the helper module from the source tree. The
         # package's parent dir (…/src) is two levels up from this file
@@ -225,10 +230,14 @@ class Vantage:
         kbd, kbd_max = hw.read_kbd_backlight()
         if kbd is not None:
             state["kbd_backlight"] = kbd
-            state["kbd_backlight_max"] = kbd_max
         fans = hw.read_fan_rpms()
         if fans:
             state["fan_rpms"] = ",".join(str(rpm) for _lbl, rpm in fans)
+        if hw.fan_curve_available():
+            state["fan_curve"] = "1"
+        full = hw.read_fan_fullspeed()
+        if full is not None:
+            state["fan_fullspeed"] = "1" if full else "0"
         # ThinkPad manual fan level — only when thinkpad_acpi fan_control=1.
         if hw.fan_writable():
             lvl = hw.read_fan_level()
@@ -259,6 +268,48 @@ class Vantage:
             state["gpu_applied"] = gpu.applied_mode()
         log.debug("detected state: %s", state)
         return state
+
+    def set_fan_curve(self, points):
+        # The editor hands over tuples in CURVE_FIELDS order; the helper wants
+        # named fields, so normalise here (the single boundary).
+        payload = [point if isinstance(point, dict)
+                   else dict(zip(hw.CURVE_FIELDS, point)) for point in points]
+        if not self.ensure_custom_mode():
+            return False
+        return self._run_helper("set", "fan_curve",
+                                json.dumps(payload, separators=(",", ":")))
+
+    def ensure_custom_mode(self):
+        """Make Custom the active thermal mode; True when it already is.
+
+        The EC only keeps a custom fan curve in Custom mode — elsewhere it
+        silently discards curve writes, so a curve Apply must establish the
+        mode first instead of reporting a success the hardware ignored.
+        """
+        if not hw.powermode_available():
+            return True
+        current, _choices = hw.read_platform_profile()
+        if current == "custom":
+            return True
+        if self.set_power_profile("custom") is not True:
+            log.error("could not switch to custom mode for the fan curve")
+            return False
+        return True
+
+    @staticmethod
+    def fan_curve():
+        return hw.read_fan_curve()
+
+    @staticmethod
+    def fan_curve_available():
+        return hw.fan_curve_available()
+
+    @staticmethod
+    def fan_fullspeed_available():
+        return hw.fan_fullspeed_available()
+
+    def set_fan_fullspeed(self, on):
+        return self._run_helper("set", "fan_fullspeed", "1" if on else "0")
 
     # ---- privileged writes (via pkexec helper) -------------------------------
     def set_vpc(self, attr, value):
@@ -310,10 +361,6 @@ class Vantage:
             return err or False
         return True
 
-    def reboot(self):
-        """Reboot the machine via logind (prompts through its own polkit agent)."""
-        run("systemctl", "reboot")
-
     # ---- session-level writes (no root) --------------------------------------
     def set_mic_on(self, on):
         run("pactl", "set-source-mute", "@DEFAULT_SOURCE@", "0" if on else "1",
@@ -323,10 +370,12 @@ class Vantage:
         run("nmcli", "radio", "wifi", "on" if on else "off", timeout=TOOL_TIMEOUT)
 
     def set_power_profile(self, name):
-        # power-profiles-daemon owns platform_profile on models where we defer to
-        # it; on models with an authoritative firmware interface we always write
-        # the ACPI sysfs directly (root, via the helper), which validates the
-        # value against platform_profile_choices.
+        # On Legion hardware the EC-native powermode attribute is the only way
+        # to select "custom" (the kernel platform_profile interface refuses it),
+        # and it is also what makes a custom fan curve stick. Prefer it; fall
+        # back to power-profiles-daemon and then to raw platform_profile.
+        if hw.powermode_available():
+            return self._run_helper("set", "powermode", name)
         if not hw.use_platform_thermal_profile() and have("powerprofilesctl"):
             run("powerprofilesctl", "set", name, timeout=TOOL_TIMEOUT)
             return

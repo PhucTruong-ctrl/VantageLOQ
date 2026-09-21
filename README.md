@@ -13,8 +13,12 @@ A native GTK4 app that brings Lenovo Vantage controls to Linux — battery conse
 - Battery Health — shows capacity vs. design capacity, charge cycles, and current charge
 
 **Thermal**
-- Fan Mode — Super Silent, Standard, Dust Cleaning, Efficient Thermal Dissipation
+- Thermal Mode — Low Power, Balanced, Performance, Max Power, Custom (whichever the firmware advertises)
 - Live fan RPM readout for both fans
+- **Maximum Fan Speed** — forces both fans to full speed through the EC's own
+  `fan_fullspeed` flag when the legion driver exposes it; the dependable way to
+  spin the fans up on demand
+- Optional **Tune** button for editing a ten-point fan curve when the kernel exposes writable `legion_hwmon` curve controls
 
 **Graphics** (NVIDIA Optimus laptops)
 - Graphics Mode — lock the machine to the integrated GPU (*Integrated*, blacklists
@@ -176,30 +180,34 @@ GSETTINGS_SCHEMA_DIR=$PWD/data PYTHONPATH=$PWD/src python3 -m vantage.main
 ## Tested hardware
 
 - **Lenovo LOQ 15IAX9 (machine type 83GS)** — Kernel DMI reports
-  `product_name=83GS` and `product_version=LOQ 15IAX9`.
+  `product_name=83GS` and `product_version=LOQ 15IAX9`. This is the tested
+  hardware; compatible LOQ and Legion models may expose the same capabilities.
 
-  This model exposes the generic VPC2004 `fan_mode` attribute, but it is not
-  trustworthy as persistent thermal-profile state: writing `4` succeeds while
-  an immediate readback returns `0`. Vantage therefore uses the ACPI
-  `/sys/firmware/acpi/platform_profile` interface as the authoritative thermal
-  mode, offers it as a **Thermal Mode** selector, and reads the current value
-  back from the kernel on refresh so external changes (such as Lenovo Fn+Q)
-  appear in the app. Every value advertised by
-  `/sys/firmware/acpi/platform_profile_choices` is offered; on this model
-  today those values are `low-power`, `balanced`, `performance`, `max-power`,
-  and `custom`.
+  When `/sys/class/platform-profile/platform-profile-*/name` reports
+  `lenovo-legion` and the platform-profile files are readable, Vantage selects
+  **Thermal Mode** through that generic provider rather than a hard-coded
+  machine-type list. It offers every value advertised by
+  `/sys/firmware/acpi/platform_profile_choices`; on the tested machine those
+  values are `low-power`, `balanced`, `performance`, `max-power`, and `custom`.
 
-  The legacy Fan Mode selector is hidden on this model, while Fan 1 / Fan 2
-  RPM telemetry is unaffected. Other Lenovo models retain the existing
-  `fan_mode` behaviour; this is model- and capability-specific, not a global
-  change.
+  The legacy Fan Mode selector is hidden when this platform-profile capability
+  is present. Machines without it retain the existing `fan_mode` behaviour;
+  this is capability-specific, not a global change. Fan 1 / Fan 2 RPM
+  telemetry remains available independently.
+
+  The **Tune** button appears only when a readable `legion_hwmon` hwmon node
+  exposes writable `pwm*_auto_point*_...` controls. Its editor covers ten
+  CPU/GPU curve points, maximum temperatures, hysteresis, and fan PWM values;
+  it validates temperatures, hysteresis, and PWM ranges before applying through
+  the privileged helper. Models without those controls keep telemetry but do
+  not show Tune and do not gain custom-curve support.
 
 ### Thermal Mode ownership
 
-On this model, `/sys/firmware/acpi/platform_profile` is provided by the
-out-of-tree **legion_laptop** kernel module (LenovoLegionLinux DKMS). Each
-write is forwarded to the embedded controller through WMI (`SETSMARTFANMODE`);
-the firmware/EC performs the closed-loop thermal management.
+The platform-profile interface is provided by the out-of-tree **legion_laptop**
+kernel module (LenovoLegionLinux DKMS). Each write is forwarded to the embedded
+controller through WMI (`SETSMARTFANMODE`); the firmware/EC performs the
+closed-loop thermal management.
 
 If **power-profiles-daemon** is running, it mirrors this node. It notices
 external changes within a few seconds and adopts the standard profiles
@@ -223,6 +231,24 @@ state meaning that no standard profile currently represents the settings, not
 a selectable one. Vantage still lists it because it can be the reported
 current state, and shows a toast if the kernel rejects the selection.
 
-The kernel exposes only the profile selector on this machine, so Vantage
-provides no fan-curve, CPU-limit, or GPU-TGP sliders and invents no sysfs
-mappings for `custom`.
+When the legion driver exposes its EC-native `powermode` attribute, Vantage
+selects thermal modes through it because the generic `platform_profile`
+interface cannot select `custom`. A custom fan curve is kept only in Custom
+thermal mode; the EC silently discards curve writes in other modes. Applying
+a fan curve therefore switches to Custom mode first, and the editor reports
+failure if that mode cannot be established. The live mode is always read back from
+the kernel, so the selector shows `custom` once Custom mode is active.
+
+Even in Custom mode the kernel's curve interface is read-modify-write *per
+attribute*: every single write re-reads the whole curve from the EC and writes
+it all back, so a later attribute can revert an earlier one from a stale read.
+Measured on the tested machine, some points are silently dropped this way while
+the sysfs write still returns success. Vantage therefore writes, re-reads,
+retries, and verifies the result, and the editor reloads the stored curve after
+Apply — it reports success only for changes the EC actually kept. Fan speeds are
+stored as RPM/100, so a PWM value comes back quantised by a few units.
+
+The kernel exposes only the profile selector on this machine, plus the optional
+`legion_hwmon` fan-curve controls described above. Vantage does not invent
+fan-curve, CPU-limit, or GPU-TGP mappings for `custom`; curve editing is
+available only when those controls are actually exposed and writable.
