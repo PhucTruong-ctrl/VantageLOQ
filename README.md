@@ -172,3 +172,57 @@ GSETTINGS_SCHEMA_DIR=$PWD/data PYTHONPATH=$PWD/src python3 -m vantage.main
 - `gettext`
 - `glib2` schema tools (`glib-compile-schemas`)
 - `appstream` *(optional — used to validate the metainfo)*
+
+## Tested hardware
+
+- **Lenovo LOQ 15IAX9 (machine type 83GS)** — Kernel DMI reports
+  `product_name=83GS` and `product_version=LOQ 15IAX9`.
+
+  This model exposes the generic VPC2004 `fan_mode` attribute, but it is not
+  trustworthy as persistent thermal-profile state: writing `4` succeeds while
+  an immediate readback returns `0`. Vantage therefore uses the ACPI
+  `/sys/firmware/acpi/platform_profile` interface as the authoritative thermal
+  mode, offers it as a **Thermal Mode** selector, and reads the current value
+  back from the kernel on refresh so external changes (such as Lenovo Fn+Q)
+  appear in the app. Every value advertised by
+  `/sys/firmware/acpi/platform_profile_choices` is offered; on this model
+  today those values are `low-power`, `balanced`, `performance`, `max-power`,
+  and `custom`.
+
+  The legacy Fan Mode selector is hidden on this model, while Fan 1 / Fan 2
+  RPM telemetry is unaffected. Other Lenovo models retain the existing
+  `fan_mode` behaviour; this is model- and capability-specific, not a global
+  change.
+
+### Thermal Mode ownership
+
+On this model, `/sys/firmware/acpi/platform_profile` is provided by the
+out-of-tree **legion_laptop** kernel module (LenovoLegionLinux DKMS). Each
+write is forwarded to the embedded controller through WMI (`SETSMARTFANMODE`);
+the firmware/EC performs the closed-loop thermal management.
+
+If **power-profiles-daemon** is running, it mirrors this node. It notices
+external changes within a few seconds and adopts the standard profiles
+(`balanced`, `performance`, and `low-power` as its power-saver profile), but
+cannot represent `max-power` or `custom`. It logs a warning and keeps
+reporting its previous profile for those values, and does not write the node
+back in this configuration. It is therefore not the source of truth, and
+Vantage does not round-trip those values through it.
+
+Reads are live reads of the embedded controller — the kernel module issues a
+`GETSMARTFANMODE` WMI call per read — so the profile can change without any
+userspace writer at all: the Fn+Q hotkey is handled by the firmware/EC itself
+and never shows up as a profile write in the kernel log. Vantage therefore
+reads the raw kernel value on every refresh and writes through the privileged
+helper, and caches nothing: Fn+Q and any other external change appear as-is
+after a refresh or when the window is reopened.
+
+`custom` is advertised in `platform_profile_choices`, but the global
+platform-profile interface refuses to select it (`EINVAL`): it is a reported
+state meaning that no standard profile currently represents the settings, not
+a selectable one. Vantage still lists it because it can be the reported
+current state, and shows a toast if the kernel rejects the selection.
+
+The kernel exposes only the profile selector on this machine, so Vantage
+provides no fan-curve, CPU-limit, or GPU-TGP sliders and invents no sysfs
+mappings for `custom`.

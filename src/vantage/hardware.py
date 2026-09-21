@@ -271,6 +271,39 @@ def read_dmi_serial():
     return read_dmi("product_serial")
 
 
+# ---- Model-specific thermal routing ------------------------------------------
+# On some Lenovo models the VPC2004 fan_mode attribute exists and accepts writes
+# but does not persist them: writing "4" and reading it straight back returns 0.
+# The ACPI platform_profile is the authoritative persistent thermal mode there,
+# so the generic fan_mode selector is suppressed (see use_platform_thermal_profile).
+# Low-level model detection is kept separate from the capability decision so more
+# models can join the set without any UI changes.
+def machine_type():
+    """Return the Lenovo DMI machine type (product_name), e.g. '83GS'."""
+    return read_dmi("product_name")
+
+
+def is_loq_15iax9():
+    """True on a Lenovo LOQ 15IAX9 (DMI machine type 83GS)."""
+    return machine_type() == "83GS"
+
+
+def use_platform_thermal_profile():
+    """True if ACPI platform_profile is the authoritative persistent thermal mode.
+
+    On these machines fan_mode is not a trustworthy persistent-state interface
+    (writes read back as 0), so the UI must offer platform_profile instead and
+    hide the generic Fan Mode selector. RPM telemetry is unaffected.
+    Additionally logs the detected DMI identity and the chosen backend at debug
+    level, so one refresh is enough to tell from a log which path was taken.
+    """
+    use_profile = is_loq_15iax9() and os.path.exists(PLATFORM_PROFILE)
+    log.debug("DMI product_name=%r product_version=%r -> thermal backend: %s",
+              machine_type(), read_dmi("product_version"),
+              "platform_profile" if use_profile else "fan_mode")
+    return use_profile
+
+
 def read_fan_rpms():
     """Return [(label, rpm_int), ...] for every readable hwmon fan, or [].
 

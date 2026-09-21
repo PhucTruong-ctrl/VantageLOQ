@@ -33,12 +33,16 @@ FAN_LEVEL_LABELS = ([_("Auto")]
 
 log = logging.getLogger("vantage.window")
 
-# power-profiles-daemon profile id -> human label.
+# power-profiles-daemon profile id -> human label. Firmware-specific ids
+# (max-power, custom) appear on Lenovo LOQ models whose raw platform_profile
+# we read directly.
 PROFILE_LABELS = {
     "power-saver": _("Power Saver"),
     "low-power": _("Low Power"),
     "balanced": _("Balanced"),
     "performance": _("Performance"),
+    "max-power": _("Max Power"),
+    "custom": _("Custom"),
 }
 
 
@@ -155,7 +159,7 @@ class VantageWindow(Adw.ApplicationWindow):
             self._add_bios_toggle(
                 power, "AlwaysOnUSB", _("Always-On USB"),
                 _("Keep USB ports powered while off · applies after reboot"))
-        if "power_profile" in st:
+        if "power_profile" in st and st.get("thermal_backend") != "platform_profile":
             self._add_power_profile(power)
         if self.backend.battery_info():
             self._add_battery_health(power)
@@ -166,6 +170,8 @@ class VantageWindow(Adw.ApplicationWindow):
             self._add_fan_mode(thermal)
         if "fan_level" in st:
             self._add_fan_level(thermal)
+        if "power_profile" in st and st.get("thermal_backend") == "platform_profile":
+            self._add_power_profile(thermal, thermal_mode=True)
         if "fan_rpms" in st:
             self._add_fan_speed(thermal)
         self._maybe_add(thermal)
@@ -238,7 +244,8 @@ class VantageWindow(Adw.ApplicationWindow):
         self._updaters.append(
             lambda s: self._sync(row, "active", active_fn(s)))
 
-    def _combo(self, group, key, title, subtitle, labels, index_fn, on_select):
+    def _combo(self, group, key, title, subtitle, labels, index_fn, on_select,
+               error_msg=None):
         group._has_rows = True
         row = Adw.ComboRow(title=title, subtitle=subtitle,
                            model=Gtk.StringList.new(labels))
@@ -246,7 +253,8 @@ class VantageWindow(Adw.ApplicationWindow):
         if idx is not None:
             row.set_selected(idx)
         row.connect("notify::selected",
-                    lambda r, _p: self._handle(lambda: on_select(r.get_selected())))
+                    lambda r, _p: self._handle(
+                        lambda: on_select(r.get_selected()), error_msg))
         group.add(row)
 
         def upd(s):
@@ -327,16 +335,20 @@ class VantageWindow(Adw.ApplicationWindow):
 
         self._bios_inits.append(init)
 
-    def _add_power_profile(self, group):
+    def _add_power_profile(self, group, thermal_mode=False):
         choices = [c for c in self.state["power_profile_choices"].split(",") if c]
         self._profiles = choices
-        labels = [PROFILE_LABELS.get(c, c.title()) for c in choices]
-        self._combo(group, "power_profile", _("Power Profile"),
-                    _("System performance vs. battery"),
-                    labels,
+        labels = [PROFILE_LABELS.get(c, c.replace("-", " ").title())
+                  for c in choices]
+        title = _("Thermal Mode") if thermal_mode else _("Power Profile")
+        subtitle = (_("Firmware performance and cooling profile") if thermal_mode
+                    else _("System performance vs. battery"))
+        self._combo(group, "power_profile", title, subtitle, labels,
                     lambda s: self._profiles.index(s["power_profile"])
                     if s.get("power_profile") in self._profiles else None,
-                    lambda i: self.backend.set_power_profile(self._profiles[i]))
+                    lambda i: self.backend.set_power_profile(self._profiles[i]),
+                    error_msg=_("Couldn’t apply that thermal mode — "
+                                "the kernel rejected it"))
 
     def _add_fan_mode(self, group):
         group._has_rows = True
@@ -829,11 +841,18 @@ class VantageWindow(Adw.ApplicationWindow):
         if row.get_property(prop) != value:
             row.set_property(prop, value)
 
-    def _handle(self, action):
+    def _handle(self, action, error_msg=None):
         if self._guard:
             return
         # Run the (possibly pkexec-backed) write off the main loop, then refresh.
-        self.backend.call_async(action, lambda _r: self.refresh())
+        # A failed write is not cached or faked: the refresh below re-reads the
+        # kernel, so the widget snaps back to the real value, and error_msg tells
+        # the user why (e.g. a profile the firmware advertises but refuses).
+        def done(res):
+            self.refresh()
+            if res is False and error_msg:
+                self._toast(error_msg)
+        self.backend.call_async(action, done)
 
     def refresh(self, *_):
         # State reads spawn pactl/nmcli/powerprofilesctl — do it off-thread and

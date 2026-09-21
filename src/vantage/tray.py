@@ -25,6 +25,7 @@ log = logging.getLogger("vantage.tray")
 PROFILE_LABELS = {
     "power-saver": _("Power Saver"), "low-power": _("Low Power"),
     "balanced": _("Balanced"), "performance": _("Performance"),
+    "max-power": _("Max Power"), "custom": _("Custom"),
 }
 KBD_LABELS = [_("Off"), _("Low"), _("High")]
 
@@ -338,7 +339,8 @@ class VantageMenu:
         children = []
         for p in profiles:
             props = {
-                "label":        GLib.Variant("s", PROFILE_LABELS.get(p, p.title())),
+                "label":        GLib.Variant(
+                    "s", PROFILE_LABELS.get(p, p.replace("-", " ").title())),
                 "toggle-type":  GLib.Variant("s", "radio"),
                 "toggle-state": GLib.Variant("i", 1 if p == current else 0),
                 "enabled":      GLib.Variant("b", True),
@@ -348,9 +350,13 @@ class VantageMenu:
                     lambda: self._backend.set_power_profile(name),
                     lambda _r: self.rebuild())
             children.append((self._alloc(props, action), props, []))
-        cur_label = PROFILE_LABELS.get(current, current or "?")
+        cur_label = PROFILE_LABELS.get(
+            current, (current or "?").replace("-", " ").title())
+        label_key = (_("Thermal Mode: %s")
+                     if st.get("thermal_backend") == "platform_profile"
+                     else _("Power Profile: %s"))
         parent_props = {
-            "label":            GLib.Variant("s", _("Power Profile: %s") % cur_label),
+            "label":            GLib.Variant("s", label_key % cur_label),
             "children-display": GLib.Variant("s", "submenu"),
             "enabled":          GLib.Variant("b", True),
         }

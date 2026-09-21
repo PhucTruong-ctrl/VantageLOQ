@@ -56,8 +56,17 @@ def _set(key, value):
         return hw.write_charge_thresholds(95, 100)
     if key == "platform_profile":
         # write_platform_profile validates the value against the kernel's
-        # platform_profile_choices, so no separate whitelist is needed.
-        return hw.write_platform_profile(value)
+        # platform_profile_choices, so no separate whitelist is needed. The
+        # kernel still refuses some advertised values ("custom" is a reported
+        # state, not a selectable one) with EINVAL, so turn that into a clean
+        # one-line failure instead of dumping a traceback at the caller.
+        try:
+            return hw.write_platform_profile(value)
+        except OSError as exc:
+            sys.stderr.write(
+                "vantage-helper: platform_profile %r rejected: %s\n"
+                % (value, exc))
+            return False
     if key == "fan_level":
         # write_fan_level validates against hw.FAN_LEVELS and the fan_control
         # gate, so the value is already constrained.

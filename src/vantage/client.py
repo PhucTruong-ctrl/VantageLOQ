@@ -200,7 +200,15 @@ class Vantage:
     def get_state(self):
         """Return {key: str} for every control available on this machine."""
         state = {}
+        # On models where the firmware platform_profile is authoritative the VPC
+        # fan_mode attribute lies (accepts writes, reads back 0), so it is dropped
+        # from the state entirely — the UI and tray are capability-driven off the
+        # state keys, so this hides the legacy Fan Mode selector with no model
+        # checks in the widgets. Fan RPM telemetry below is unaffected.
+        thermal_profile = hw.use_platform_thermal_profile()
         for key, attr in hw.VPC_ATTRS.items():
+            if key == "fan_mode" and thermal_profile:
+                continue
             val = hw.read_attr(attr)
             if val is not None:
                 state[key] = val
@@ -242,6 +250,10 @@ class Vantage:
         if cur is not None:
             state["power_profile"] = cur
             state["power_profile_choices"] = ",".join(choices)
+        state["thermal_backend"] = ("platform_profile" if thermal_profile
+                                    else "fan_mode")
+        log.debug("thermal backend=%s platform_profile=%r choices=%s",
+                  state["thermal_backend"], cur, choices)
         if gpu.available():
             state["gpu_mode"] = gpu.current_mode()
             state["gpu_applied"] = gpu.applied_mode()
@@ -311,12 +323,14 @@ class Vantage:
         run("nmcli", "radio", "wifi", "on" if on else "off", timeout=TOOL_TIMEOUT)
 
     def set_power_profile(self, name):
-        # power-profiles-daemon owns platform_profile when present; otherwise
-        # write the ACPI sysfs directly (root, via the helper).
-        if have("powerprofilesctl"):
+        # power-profiles-daemon owns platform_profile on models where we defer to
+        # it; on models with an authoritative firmware interface we always write
+        # the ACPI sysfs directly (root, via the helper), which validates the
+        # value against platform_profile_choices.
+        if not hw.use_platform_thermal_profile() and have("powerprofilesctl"):
             run("powerprofilesctl", "set", name, timeout=TOOL_TIMEOUT)
-        else:
-            self._run_helper("set", "platform_profile", name)
+            return
+        self._run_helper("set", "platform_profile", name)
 
     # ---- session-level reads -------------------------------------------------
     @staticmethod
@@ -338,23 +352,25 @@ class Vantage:
     def _power_profile():
         """Return (current, [choices]).
 
-        Prefer power-profiles-daemon; fall back to reading the ACPI
-        platform_profile sysfs directly so the control still appears on
-        machines without the daemon (e.g. a bare ThinkPad install).
+        On models where the firmware platform_profile is authoritative we read
+        the raw kernel interface directly: it is the source of truth and it
+        exposes firmware-specific choices (max-power, custom) that
+        power-profiles-daemon hides or remaps. Everywhere else prefer
+        power-profiles-daemon, falling back to the raw sysfs so the control
+        still appears on machines without the daemon (e.g. a bare ThinkPad).
         """
-        if not have("powerprofilesctl"):
-            return hw.read_platform_profile()
-        r = run("powerprofilesctl", "list", timeout=TOOL_TIMEOUT)
-        if r is None or r.returncode != 0:
-            return None, []
-        choices, current = [], None
-        for line in (r.stdout or "").splitlines():
-            m = re.match(r"\s*(\*?)\s*([a-z-]+):\s*$", line)
-            if m:
-                choices.append(m.group(2))
-                if m.group(1) == "*":
-                    current = m.group(2)
-        return current, choices
+        if not hw.use_platform_thermal_profile() and have("powerprofilesctl"):
+            r = run("powerprofilesctl", "list", timeout=TOOL_TIMEOUT)
+            if r is not None and r.returncode == 0:
+                choices, current = [], None
+                for line in (r.stdout or "").splitlines():
+                    m = re.match(r"\s*(\*?)\s*([a-z-]+):\s*$", line)
+                    if m:
+                        choices.append(m.group(2))
+                        if m.group(1) == "*":
+                            current = m.group(2)
+                return current, choices
+        return hw.read_platform_profile()
 
     # ---- read-only telemetry -------------------------------------------------
     @staticmethod
